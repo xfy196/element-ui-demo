@@ -51,7 +51,7 @@
         <el-table-column prop="id" label="ID" width="70" />
         <el-table-column label="省市区" min-width="220">
           <template slot-scope="{ row }">
-            {{ (row.regionLabels || []).join(' / ') || (row.regionCodes || []).join(' / ') }}
+            {{ formatRegionCell(row) }}
           </template>
         </el-table-column>
         <el-table-column prop="address" label="详情地址" min-width="160" />
@@ -74,16 +74,32 @@ import {
   listAddresses
 } from '@/api/region'
 
+/** 空白表单，避免各处手写字段漏改 */
+function createEmptyForm() {
+  return {
+    id: null,
+    regionCodes: [],
+    address: ''
+  }
+}
+
+/** 接口行政区划 → cascader option */
+function toCascaderOption(item) {
+  return {
+    value: item.code,
+    label: item.name,
+    leaf: !item.hasChildren
+  }
+}
+
 export default {
   name: 'AddressForm',
+
   data() {
     return {
-      form: {
-        id: null,
-        regionCodes: [],
-        address: ''
-      },
+      form: createEmptyForm(),
       regionOptions: [],
+      // 变更 options 后强制 remount，避免懒加载缓存与回显冲突
       cascaderKey: 0,
       saving: false,
       list: [],
@@ -102,26 +118,36 @@ export default {
       }
     }
   },
+
   created() {
     this.refreshList()
     this.loadEdit(1)
   },
+
   methods: {
+    // —— Cascader ——
+
+    /** level: 0 省 / 1 市 / 2 区 / 3 街道 */
     lazyLoadRegions(node, resolve) {
-      const { level, value } = node
-      // cascader level 0→PROVINCE, 1→CITY, 2→DISTRICT, 3→TOWNSHIP
-      const parentCode = level === 0 ? undefined : value
-      fetchRegionChildrenByCascaderLevel(level, parentCode)
-        .then((items) => {
-          const mapped = (items || []).map((item) => ({
-            value: item.code,
-            label: item.name,
-            leaf: !item.hasChildren
-          }))
-          resolve(mapped)
-        })
+      const parentCode = node.level === 0 ? undefined : node.value
+
+      fetchRegionChildrenByCascaderLevel(node.level, parentCode)
+        .then((items) => resolve((items || []).map(toCascaderOption)))
         .catch(() => resolve([]))
     },
+
+    remountCascader(options = []) {
+      this.regionOptions = options
+      this.cascaderKey += 1
+    },
+
+    formatRegionCell(row) {
+      const labels = row.regionLabels || []
+      const codes = row.regionCodes || []
+      return labels.length ? labels.join(' / ') : codes.join(' / ')
+    },
+
+    // —— 回显 / 新建 / 重置 ——
 
     async loadEdit(id) {
       try {
@@ -134,33 +160,32 @@ export default {
     },
 
     /**
-     * 回显：无 path 接口，前端逐层拉 PROVINCE→CITY→DISTRICT 拼 options，再赋 value
+     * 无 path 接口时：按 codes 逐层拉数据拼 options → remount → 再赋 v-model
      */
     async applyEcho(record) {
       const codes = record.regionCodes || []
+
       this.form = {
         id: record.id,
         regionCodes: [],
         address: record.address || ''
       }
 
-      if (codes.length) {
-        const pathData = await buildRegionPathOptions(codes)
-        this.regionOptions = pathData.options || []
-        this.cascaderKey += 1
-        await this.$nextTick()
-        this.form.regionCodes = codes.slice()
-      } else {
-        this.regionOptions = []
-        this.cascaderKey += 1
+      if (!codes.length) {
+        this.remountCascader([])
+        return
       }
+
+      const { options } = await buildRegionPathOptions(codes)
+      this.remountCascader(options || [])
+      await this.$nextTick()
+      this.form.regionCodes = codes.slice()
     },
 
     resetCreate() {
-      this.form = { id: null, regionCodes: [], address: '' }
-      this.regionOptions = []
-      this.cascaderKey += 1
-      this.$nextTick(() => this.$refs.form && this.$refs.form.clearValidate())
+      this.form = createEmptyForm()
+      this.remountCascader([])
+      this.clearValidate()
     },
 
     onReset() {
@@ -171,9 +196,18 @@ export default {
       }
     },
 
+    clearValidate() {
+      this.$nextTick(() => {
+        if (this.$refs.form) this.$refs.form.clearValidate()
+      })
+    },
+
+    // —— 保存 / 列表 ——
+
     onSubmit() {
       this.$refs.form.validate(async (valid) => {
         if (!valid) return
+
         this.saving = true
         try {
           const saved = await saveAddress({

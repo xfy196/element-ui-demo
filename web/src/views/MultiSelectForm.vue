@@ -37,15 +37,15 @@
             @load-more="onLoadMore"
             @visible-change="onVisibleChange"
           >
-            <template slot-scope="{ options: opts }">
+            <template slot-scope="{ options: dropdownOptions }">
               <el-option
-                v-for="item in opts"
+                v-for="item in dropdownOptions"
                 :key="item.id"
                 :label="item.label"
                 :value="item.id"
               >
                 <span>{{ item.label }}</span>
-                <span style="float: right; color: #8492a6; font-size: 12px">{{ item.code }}</span>
+                <span class="option-code">{{ item.code }}</span>
               </el-option>
             </template>
           </el-select-loadmore>
@@ -66,8 +66,7 @@
         <el-table-column prop="id" label="ID" width="70" />
         <el-table-column label="已选" min-width="280">
           <template slot-scope="{ row }">
-            {{ (row.optionLabels || []).join('、') }}
-            <span style="color: #909399"> ({{ (row.optionIds || []).join(',') }})</span>
+            {{ formatSelectedCell(row) }}
           </template>
         </el-table-column>
         <el-table-column prop="remark" label="备注" min-width="160" />
@@ -94,24 +93,36 @@ import {
 
 const PAGE_SIZE = 20
 
+/** 空白表单，避免各处手写字段漏改 */
+function createEmptyForm() {
+  return {
+    id: null,
+    optionIds: [],
+    remark: ''
+  }
+}
+
 export default {
   name: 'MultiSelectForm',
   components: { ElSelectLoadmore },
+
   data() {
     return {
-      form: {
-        id: null,
-        optionIds: [],
-        remark: ''
-      },
-      selectedOptions: [],
+      form: createEmptyForm(),
+
+      // pinned：已选/回显项，重置列表时始终保留在 options 前部，保证 label 能显示
+      pinnedOptions: [],
+      // 下拉当前展示列表（pinned + 当前页搜索结果）
       options: [],
+
       keyword: '',
       page: 1,
       hasMore: true,
       loading: false,
       loadMoreLoading: false,
-      inited: false,
+      // 首次展开下拉时才拉第一页
+      listInited: false,
+
       saving: false,
       list: [],
       rules: {
@@ -121,13 +132,17 @@ export default {
       }
     }
   },
+
   created() {
     this.refreshList()
     this.loadEdit(1)
   },
+
   methods: {
+    // —— 下拉：展开 / 搜索 / 触底 ——
+
     onVisibleChange(visible) {
-      if (visible && !this.inited) {
+      if (visible && !this.listInited) {
         this.fetchList({ reset: true })
       }
     },
@@ -143,6 +158,10 @@ export default {
       this.fetchList({ reset: false })
     },
 
+    /**
+     * reset=true：从第 1 页重查，用 pinned 合并结果
+     * reset=false：追加下一页到现有 options
+     */
     async fetchList({ reset } = {}) {
       if (reset) {
         this.page = 1
@@ -160,9 +179,10 @@ export default {
         })
         const pageList = data.list || []
         this.hasMore = !!data.hasMore
+
         if (reset) {
-          this.options = mergeOptions(this.selectedOptions, pageList)
-          this.inited = true
+          this.options = mergeOptions(this.pinnedOptions, pageList)
+          this.listInited = true
         } else {
           this.options = mergeOptions(this.options, pageList)
         }
@@ -175,6 +195,14 @@ export default {
       }
     },
 
+    formatSelectedCell(row) {
+      const labels = (row.optionLabels || []).join('、')
+      const ids = (row.optionIds || []).join(',')
+      return ids ? `${labels} (${ids})` : labels
+    },
+
+    // —— 回显 / 新建 / 重置 ——
+
     async loadEdit(id) {
       try {
         const record = await getSelection(id)
@@ -186,53 +214,62 @@ export default {
     },
 
     /**
-     * 回显：batch 已选项 → 与第一页 merge → 再赋 v-model
+     * 回显：batch 已选项 → 写入 pinned → 拉第一页 merge → 再赋 v-model
      */
     async applyEcho(record) {
       const ids = (record.optionIds || []).map(Number)
+
       this.form = {
         id: record.id,
         optionIds: [],
         remark: record.remark || ''
       }
       this.keyword = ''
-      this.inited = false
+      this.listInited = false
 
-      let preset = []
-      if (ids.length) {
-        const batch = await fetchOptionsByIds(ids)
-        preset = batch.list || []
-      }
-      this.selectedOptions = preset
-      this.options = preset.slice()
+      const pinned = ids.length ? await this.loadPinnedByIds(ids) : []
+      this.pinnedOptions = pinned
+      this.options = pinned.slice()
 
       await this.fetchList({ reset: true })
       await this.$nextTick()
       this.form.optionIds = ids.slice()
     },
 
+    async loadPinnedByIds(ids) {
+      const batch = await fetchOptionsByIds(ids)
+      return batch.list || []
+    },
+
     resetCreate() {
-      this.form = { id: null, optionIds: [], remark: '' }
-      this.selectedOptions = []
+      this.form = createEmptyForm()
+      this.pinnedOptions = []
       this.options = []
       this.keyword = ''
       this.page = 1
       this.hasMore = true
-      this.inited = false
+      this.listInited = false
+
       this.$nextTick(() => {
-        this.$refs.form && this.$refs.form.clearValidate()
+        if (this.$refs.form) this.$refs.form.clearValidate()
         this.fetchList({ reset: true })
       })
     },
 
     onReset() {
-      if (this.form.id) this.loadEdit(this.form.id)
-      else this.resetCreate()
+      if (this.form.id) {
+        this.loadEdit(this.form.id)
+      } else {
+        this.resetCreate()
+      }
     },
+
+    // —— 保存 / 列表 ——
 
     onSubmit() {
       this.$refs.form.validate(async (valid) => {
         if (!valid) return
+
         this.saving = true
         try {
           const saved = await saveSelection({
@@ -240,10 +277,12 @@ export default {
             optionIds: this.form.optionIds,
             remark: this.form.remark
           })
+
           this.form.id = saved.id
-          const batch = await fetchOptionsByIds(saved.optionIds)
-          this.selectedOptions = batch.list || []
-          this.options = mergeOptions(this.selectedOptions, this.options)
+          // 保存后同步 pinned，保证再次搜索时已选 label 不丢
+          this.pinnedOptions = await this.loadPinnedByIds(saved.optionIds)
+          this.options = mergeOptions(this.pinnedOptions, this.options)
+
           this.$message.success(`保存成功，id=${saved.id}`)
           await this.refreshList()
         } catch (e) {
@@ -275,5 +314,10 @@ export default {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+.option-code {
+  float: right;
+  color: #8492a6;
+  font-size: 12px;
 }
 </style>
